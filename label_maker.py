@@ -1,55 +1,10 @@
-import requests, os, json, argparse, subprocess
+import os, json, argparse, subprocess
 from openai import OpenAI
 
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 OPENAI_API_KEY = client.api_key
-
-tools = [ # WARNING: DO NOT REMOVE THE TOOL CALLS, EVEN IF YOU ARE NOT USING THEM. THE MODEL WILL NOT WORK WITHOUT THEM.
-            {
-            "type": "function",
-            "function": {
-                "name": "request_labels_list",
-                "description": "Request a list of labels from the repo.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "repo": {
-                            "type": "string",
-                            "description": "The GitHub repository to request labels for."},
-                        },
-                    "required": ["repo"],
-                    },
-                }
-            },
-            {
-            "type": "function",
-            "function": {
-                "name": "pick_labels",
-                "description": "Save a list of gh issue labels for the request.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "labels": {
-                            "type": "string",
-                            "description": "A list of labels."},
-                        "url": {
-                            "type": "string",
-                            "description": "The url of the bookmark."},
-                        "title": {
-                            "type": "string",
-                            "description": "The title of the bookmark."},
-                        "description": {
-                            "type": "string",
-                            "description": "The selected text of the bookmark."},
-                    },
-                    "required": ["labels", "url", "title", "description"],
-                },
-            }
-            },
-        ]
-
 
 def generate_new_labels(labels, url, title, description):
     """Generate new labels if the existing labels are inadequate."""
@@ -181,9 +136,10 @@ def pick_labels(url, title, description, labels):
         seed=0,
         messages=messages
     )
-    response_message = response.choices[0].message
+    # return a list of labels
+    response_message = response.choices[0].message.content
+    print(f"Labels Picked: {response_message}")
     return response_message
-
 
 parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
 parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
@@ -191,30 +147,6 @@ parser.add_argument('--title', metavar='title', type=str, help='The title of the
 parser.add_argument('--description', metavar='description', type=str, help='The selected text of the bookmark.')
 parser.add_argument('--repo', metavar='repo', type=str, help='The repo to get labels from.', default="irthomasthomas/undecidability")
 args = parser.parse_args()
-tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "create_new_label",
-                "description": "Create a new label for the bookmark.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "repo": {
-                            "type": "string",
-                            "description": "The GitHub repository to create a label for."},
-                        "name": {
-                            "type": "string",
-                            "description": "The name of the label."},
-                        "description": {
-                            "type": "string",
-                            "description": "The description of the label."},
-                    },
-                    "required": ["repo", "name", "description"],
-                },
-            }
-        }
-    ]
 
 # Algorithm:
 # 1. Request a list of labels from the repo.
@@ -223,20 +155,22 @@ tools = [
 # 4. Create the new labels.
 # 5. Pick the labels to assign to the bookmark.
 # 6. Return the labels.
+labels_dict = {}
 
 if args.url:
     labels = request_labels_list(args.repo)
     print(f"labels count: {len(labels)}")
     if new_labels_needed(labels, args.url, args.title, args.description):
-        new_labels = generate_new_labels(labels, args.url, args.title, args.description)
-        new_labels_list = json.loads(new_labels.content)
-        print(f"LABELS REQUESTED:\n {new_labels_list}")
-        confirmed = input("Are you sure you want to create new labels? (y/n)")
-        if confirmed == "n":
-            print("Exiting...")
-            exit()
-        new_labels_created = create_new_labels(args.repo, new_labels_list)
-        labels = labels + new_labels_created
-    picked_labels = pick_labels(args.url, args.title, args.description, labels)
-    print(picked_labels.content)
-        
+        generated_labels = generate_new_labels(labels, args.url, args.title, args.description)
+        generated_labels_list = json.loads(generated_labels.content)
+        print(f"LABELS REQUESTED:\n {generated_labels_list}")
+    picked_labels = json.loads(pick_labels(args.url, args.title, args.description, labels))
+    # picked_labels = {"labels:":["label1", "label2"]}
+    if generated_labels:
+        # manually add the 'New Label' label picked_labels
+        picked_labels["labels"].append("New Label") # TypeError: string indices must be integers, not 'str'
+    
+        labels_dict["picked_labels"] = picked_labels
+        # add the generated label's name,description pairs to the picked labels as a list of dicts
+        labels_dict["generated_labels"] = generated_labels_list
+    print(f"LABELS PICKED:\n {labels_dict}")
