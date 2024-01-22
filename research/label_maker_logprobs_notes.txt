@@ -1,8 +1,0 @@
-        # we need to check if "New" is in the logprobs.
-        # if it is, then we know that the model is trying to create a new label
-        # check if the logrpobs are greater than the threshold.
-        # a good logprob threshold is -1.5
-        # logprobs = second_response.choices[0].logprobs.content[0].top_logprobs
-        # print(f"logprobs: {logprobs}")
-        # for i, logprob in enumerate(logprobs):
-        #     print(f"Logprob {i}: {logprob}")     

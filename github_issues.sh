@@ -49,6 +49,7 @@ get_labels_json() {
     local TITLE="$1"
     local URL="$2"
     local DESCRIPTION="$3"
+    
     local labels=$(python /home/thomas/Development/Projects/llm/label-maker/label_maker.py --url "$URL" --title "$TITLE" --description "$DESCRIPTION")
     echo "$labels"
 }
@@ -68,14 +69,14 @@ echo "URL: $URL" >&2
 # echo "DESCRIPTION: $DESCRIPTION" >&2
 echo >&2
 labels_json=$(get_labels_json "$TITLE" "$URL" "$DESCRIPTION")
-# echo "labels_json: $labels_json" >&2
+echo "labels_json: $labels_json" >&2
 echo >&2
 generate_labels=$(echo "$labels_json" | jq '.new_labels_created | to_entries[]')
-echo "generate_labels: $generate_labels" >&2
+# echo "generate_labels: $generate_labels" >&2
 echo >&2
 picked_labels=$(echo "$labels_json" | jq '.existing_labels_picked | to_entries[] | select(.value == true) | .key')
 # echo "picked_labels: $picked_labels" >&2
 gh_markdown_highlight_generated_labels=$(echo "$generate_labels" | tr '\n' ' ' | sed 's/.$//')
-echo "gh_markdown_highlight_generated_labels: $gh_markdown_highlight_generated_labels" >&2
+# echo "gh_markdown_highlight_generated_labels: $gh_markdown_highlight_generated_labels" >&2
 
 send_note_to_github "$TITLE" "$URL" "$DESCRIPTION" "$picked_labels" "$gh_markdown_highlight_generated_labels"

@@ -1,12 +1,14 @@
-import os, json, argparse, subprocess, sys
+import os, json, argparse, subprocess, sys, requests
+import numpy as np
 from openai import OpenAI
 
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
-OPENAI_API_KEY = client.api_key
 sys.stdout = open('/dev/tty', 'w')
+
+print(f"openai version: {client._version}")
 
 def request_labels_list(repo):
     with open('/dev/tty', 'w') as f:
@@ -30,45 +32,67 @@ def request_labels_list(repo):
         return parsed_labels
 
 
-def new_labels_needed(labels, url, title, description):
-    adequate_labels_query = f"""Given the following bookmark:
-    url: {url}
-    title: {title}
-    description: {description}
+def check_if_new_labels_needed(labels, url, title, description):
+    terminal_content = ""
 
-Are new labels needed to adequately delineate the broad categories and topics of the bookmark? (True) or can you label it accurately with the existing labels? (False)
-Only answer True if you are certain that new labels are needed. If you are unsure, then answer False.
-Only reply with True or False.
+    system_message = """You are a helpful assistant designed to answer binary questions with True or False."""
 
-    **labels:**
-    {labels}
+    adequate_labels_query = f"""
+        Given the following bookmark:
+        url: {url}
+        title: {title}
+        description: {description}
 
-**Important**: Say nothing except true or false."""
+        Are new labels needed to adequately delineate the broad categories and topics of the bookmark? (True) or can you label it accurately with the existing labels? (False)
+        Only answer True if you are certain that new labels are needed. 
+        If you are unsure, then answer False.
+        New labels should be used sparingly when the increase the information content of the object.
+        Only reply with True or False.
+
+        **labels:**
+        {labels}
+
+        **Important**: Say nothing except true or false."""
+    
     messages = [
-        {"role": "system", "content": """You are a helpful assistant designed to answer binary questions with True or False."""},
+        {"role": "system", "content": system_message},
         {"role": "user", "content": adequate_labels_query}
     ]
-    # Step 1: call the model
+    
     response = client.chat.completions.create(
         model="gpt-3.5-turbo-1106",
         temperature=0,
-        seed=0,
+        seed=1234,
+        max_tokens=1,
         messages=messages,
-    )
-    response_message = response.choices[0].message
-    print(f"New Labels Are Needed: {response_message.content}")
-    if response_message.content == "True":
-        return True
-    else:
-        return False
+        logprobs=True,
+        top_logprobs=2,
+    )  
+    
+    top_two_logprobs = response.choices[0].logprobs.content[0].top_logprobs
+    
+    for i, logprob in enumerate(top_two_logprobs, start=1): 
+        terminal_content += (f"Output token {i}: {logprob.token}, logprobs: {logprob.logprob}, linear probability: {np.round(np.exp(logprob.logprob)*100,2)}%\n")
+        if np.round(np.exp(logprob.logprob)*100,2) > 99:
+            print(f"New Label required: \033[1;32;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
+            return True
+        elif np.round(np.exp(logprob.logprob)*100,2) > 95:
+            print(f"New Label required: \033[1;33;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
+            return True
+        elif np.round(np.exp(logprob.logprob)*100,2) > 90:
+            print(f"New Label required: \033[1;31;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
+            return True
+    return False
 
 
 def generate_new_labels(labels, url, title, description):
     """Generate new labels if the existing labels are inadequate."""
-    messages = [
-        {"role": "system", "content": """You are a helpful assistant designed to output correct JSON lists of labels in the JSON format: {"label": "description", "label": "description"}
-         **IMPORTANT** Pay close attention to unfamiliar words and phrases, they may be very important and delineate a new concept."""},
-        {"role": "user", "content": f"""Think of some keywords for this link.\n
+    system_message = """
+        You are a helpful assistant designed to output correct JSON lists of labels.
+        Use the JSON format: {"label": "description", "label": "description"}.
+        **IMPORTANT** Pay close attention to unfamiliar words and phrases, they may be very important to delineate a new concept.
+    """
+    user_query = f"""Think of some keywords for this link.\n
          url: {url}\n
          title: {title}\n
          description: {description}\n
@@ -78,9 +102,14 @@ def generate_new_labels(labels, url, title, description):
         Write A MAXIMUM OF TWO NEW label,description pairs to describe this link, as the existing labels are not adequate on their own.
         *IMPORTANT* Make sure the labels are useful. They should capture the topics of the link, not the link itself.
         They should also be in keeping with the style of the existing labels.
-        Keep descriptions short and to the point. They should be no longer than a sentence."""}
+        Keep descriptions short and to the point. They should be no longer than a sentence.
+    """
+    
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_query}
     ]
-    # Step 1: call the model
+    
     response = client.chat.completions.create(
         model="gpt-3.5-turbo-1106",
         response_format={"type": "json_object"},
@@ -111,11 +140,14 @@ def create_new_labels(repo, label_list):
 
 
 def pick_labels(url, title, description, labels):
-    """
-    Choose the labels to assign to a bookmark.
-    """
-    print(f"pick_labels: {labels}")
-    pick_labels_query = f"""Given the following bookmark:\n
+    """    Choose the labels to assign to a bookmark.    """
+    system_message = """
+        You are a helpful assistant designed to output JSON lists of labels. 
+        Think carefully about the labels you select. 
+        The labels you select should make it easier to organize and search for information. 
+         **IMPORTANT** Only pick from the labels provided."""
+    pick_labels_query = f"""
+    Given the following bookmark:\n
     url: {url}\n
     title: {title}\n
     description: {description}\n
@@ -123,24 +155,20 @@ def pick_labels(url, title, description, labels):
     Which, if any, of these labels certainly apply to this bookmark?
     *IMPORTANT* Only pick from the labels provided if they apply. Output a JSON list of labels.
     *IMPORTANT* if no labels apply, output an empty list or select the 'New Label' label exclusively to request a new label be made to categorize this bookmark.
-        
-    **labels:**
+    *IMPORTANT* Request new labels sparingly.
     
+    **existing labels:**
     
     {labels}
-
 
     **IMPORTANT** Only say from the labels under the **labels:** heading. Do not say anything else
     """
 
     messages = [
-        {"role": "system", "content": """You are a helpful assistant designed to output JSON lists of labels. 
-        Think carefully about the labels you select. 
-        The labels you select should make it easier to organize and search for information. 
-         **IMPORTANT** Only pick from the labels provided."""},
+        {"role": "system", "content": system_message},
         {"role": "user", "content": pick_labels_query}
     ]
-    # Step 1: call the model
+    
     response = client.chat.completions.create(
         model="gpt-3.5-turbo-1106",
         response_format={"type": "json_object"},
@@ -151,7 +179,7 @@ def pick_labels(url, title, description, labels):
     
     picked_labels = response.choices[0].message.content
     if picked_labels:
-        picked_labels_list = json.loads(picked_labels) # picked_labels_list: {'Models': True, 'llm': True, 'prompt': True, 'few-shot-learning': True}
+        picked_labels_list = json.loads(picked_labels) 
         print(f"picked_labels_list: {picked_labels_list}")
         print()
         return picked_labels_list
@@ -167,14 +195,14 @@ args = parser.parse_args()
 labels_dict = {}
 generated_labels = None
 if args.url:
+    # EXISTING LABELS
     labels = request_labels_list(args.repo)
-    if new_labels_needed(labels, args.url, args.title, args.description):
+    # PICK LABELS
+    picked_labels = pick_labels(args.url, args.title, args.description, labels)
+    # NEW LABELS GENERATION
+    if check_if_new_labels_needed(labels, args.url, args.title, args.description):
         generated_labels = generate_new_labels(labels, args.url, args.title, args.description)
         generated_labels_list = json.loads(generated_labels.content)
-
-    picked_labels = pick_labels(args.url, args.title, args.description, labels) # picked_labels_list: {'MachineLearning': 'ML Models, Training and Inference', 'AI-Agents': 'Autonomous AI agents using LLMs', 'GoogleCloud': 'Google Cloud-related content'}
-    
-    if generated_labels:
         if "New Label" not in picked_labels.keys():
             picked_labels["New Label"] = True
 
