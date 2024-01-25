@@ -6,7 +6,10 @@ client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
 )
 
-sys.stdout = open('/dev/tty', 'w')
+if os.name == 'nt':
+    sys.stdout = open('CON', 'w')
+else:
+    sys.stdout = open('/dev/tty', 'w')
 
 print(f"openai version: {client._version}")
 
@@ -70,23 +73,56 @@ def check_if_new_labels_needed(labels, url, title, description):
     )  
     
     top_two_logprobs = response.choices[0].logprobs.content[0].top_logprobs
-    
     for i, logprob in enumerate(top_two_logprobs, start=1): 
-        terminal_content += (f"Output token {i}: {logprob.token}, logprobs: {logprob.logprob}, linear probability: {np.round(np.exp(logprob.logprob)*100,2)}%\n")
-        if np.round(np.exp(logprob.logprob)*100,2) > 99:
-            print(f"New Label required: \033[1;32;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
-            return True
-        elif np.round(np.exp(logprob.logprob)*100,2) > 95:
-            print(f"New Label required: \033[1;33;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
-            return True
-        elif np.round(np.exp(logprob.logprob)*100,2) > 90:
-            print(f"New Label required: \033[1;31;40mTrue: {np.round(np.exp(logprob.logprob)*100,2)}\033[0m")
-            return True
-    return False
+        confidence = np.round(np.exp(logprob.logprob)*100,2)
+        if logprob.token == "True":
+            if confidence > 99:
+                print(f"New Label required: \033[1;32;40mTrue: {confidence}\033[0m")
+                return True,confidence
+            elif confidence > 98:
+                print(f"New Label required: \033[1;33;40mTrue: {confidence}\033[0m")
+                return True,confidence
+            else:
+                return True,confidence
+        elif logprob.token == "False":
+            if confidence > 99:
+                print(f"New Label required: \033[1;30;40mFalse: {confidence}\033[0m")
+                return False,confidence
+            elif confidence > 98:
+                print(f"New Label required: \033[1;35;40mFalse: {confidence}\033[0m")
+                return False,confidence
+            else:
+                print(f"New Label required: \033[1;31;40mFalse: {confidence}\033[0m")
+                return False,confidence
+    return False,0
 
 
 def generate_new_labels(labels, url, title, description):
     """Generate new labels if the existing labels are inadequate."""
+    tools = [
+        {
+            "type": "function", #
+            "function": {
+                "name": "create_new_label",
+                "description": """Create a new label to delineate the content. Think carefully and choose labels wisely.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label-name": {
+                            "type": "string",
+                            "description": "label-name."},
+                        "description": {
+                            "type": "string",
+                            "description": "The description of the label."},
+                        "repo": {
+                            "type": "string",
+                            "description": "The repo to create the label in."},
+                    },
+                    "required": ["label-name", "description", "repo"],
+                },
+            },
+        },
+    ]
     system_message = """
         You are a helpful assistant designed to output correct JSON lists of labels.
         Use the JSON format: {"label": "description", "label": "description"}.
@@ -97,10 +133,11 @@ def generate_new_labels(labels, url, title, description):
          title: {title}\n
          description: {description}\n
          
-         **labels:**
+         **current labels:**
          {labels}\n
-        Write A MAXIMUM OF TWO NEW label,description pairs to describe this link, as the existing labels are not adequate on their own.
-        *IMPORTANT* Make sure the labels are useful. They should capture the topics of the link, not the link itself.
+
+        Write A MAXIMUM OF TWO NEW label,description pairs to describe this link.
+        *IMPORTANT* Make sure the labels are useful. They should delineate the topic without being overly specific.
         They should also be in keeping with the style of the existing labels.
         Keep descriptions short and to the point. They should be no longer than a sentence.
     """
@@ -109,20 +146,29 @@ def generate_new_labels(labels, url, title, description):
         {"role": "system", "content": system_message},
         {"role": "user", "content": user_query}
     ]
-    
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo-1106",
-        response_format={"type": "json_object"},
-        temperature=1,
-        seed=0,
-        messages=messages,
-    )
-    response_message = response.choices[0].message
-    print(f"response_message: {response_message.content}")
-    return response_message
+    max_retries = 3
+    while max_retries > 0:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo-1106",
+            temperature=1,
+            seed=1234,
+            messages=messages,
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "create_new_label"}},
+        )
+        response_message = response.choices[0].message
+        tool_calls = response_message.tool_calls
+        function_name = tool_calls[0].function.name
+        if not function_name == "create_new_label":
+            max_retries -= 1
+            continue
+        else:
+            function_args = json.loads(tool_calls[0].function.arguments)
+            return function_args
+    raise Exception("Failed to get labels")
 
 
-def create_new_labels(repo, label_list):
+def create_new_gh_issues_labels(repo, label_list):
     """Create new labels for a GitHub repo."""
     new_labels_created = []
     for label in label_list:
@@ -141,49 +187,84 @@ def create_new_labels(repo, label_list):
 
 def pick_labels(url, title, description, labels):
     """    Choose the labels to assign to a bookmark.    """
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "assign_content_labels",
+                "description": "Save a list of labels picked to delineate content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label_name": {
+                            "type": "string",
+                            "description": "A list of label names."},
+                    },
+                    "required": ["label_name"],
+                },
+            },
+        },
+    ]
     system_message = """
-        You are a helpful assistant designed to output JSON lists of labels. 
+        You are a helpful assistant designed to label text. 
         Think carefully about the labels you select. 
-        The labels you select should make it easier to organize and search for information. 
-         **IMPORTANT** Only pick from the labels provided."""
+        The labels you select should make it easier to organize and search for information.
+         **IMPORTANT** Only pick from the labels here given."""
     pick_labels_query = f"""
-    Given the following bookmark:\n
+    Given the following content:\n
     url: {url}\n
     title: {title}\n
     description: {description}\n
     
-    Which, if any, of these labels certainly apply to this bookmark?
-    *IMPORTANT* Only pick from the labels provided if they apply. Output a JSON list of labels.
-    *IMPORTANT* if no labels apply, output an empty list or select the 'New Label' label exclusively to request a new label be made to categorize this bookmark.
-    *IMPORTANT* Request new labels sparingly.
+    Which, if any, of these labels certainly apply to this content?
+    *IMPORTANT* Only pick up to FIVE labels from the labels provided if they apply.
     
     **existing labels:**
     
     {labels}
 
-    **IMPORTANT** Only say from the labels under the **labels:** heading. Do not say anything else
+    **IMPORTANT** Only say A MAXIMUM OF FIVE labels from the labels under the **labels:** heading. Do not say anything else
     """
 
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": pick_labels_query}
     ]
-    
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo-1106",
-        response_format={"type": "json_object"},
-        temperature=1,
-        seed=0,
-        messages=messages
-    )
-    
-    picked_labels = response.choices[0].message.content
-    if picked_labels:
-        picked_labels_list = json.loads(picked_labels) 
-        print(f"picked_labels_list: {picked_labels_list}")
-        print()
-        return picked_labels_list
+    max_retries = 3
+    while max_retries > 0:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo-1106",
+            temperature=1,
+            seed=0,
+            messages=messages,
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "assign_content_labels"}},
+        )
+        response_message = response.choices[0].message
+        tool_calls = response_message.tool_calls
+        function_name = tool_calls[0].function.name
+        if not function_name == "assign_content_labels":
+            max_retries -= 1
+            continue
+        else:
+            picked_labels = json.loads(tool_calls[0].function.arguments)
+            picked_labels_list = picked_labels['label_name'].split(",")
+            print(f"picked_labels_list: {picked_labels_list}")
+            missing_labels = {}
+            for picked_label in picked_labels_list:
+                if picked_label not in labels:
+                    picked_labels_list.remove(picked_label)
+                    missing_labels[picked_label] = "missing"
+            checked_labels = {}
+            checked_labels['label_name'] = ",".join(picked_labels_list)
+            checked_labels['missing_labels'] = missing_labels
+            
+            
+            return checked_labels
+
         
+    raise Exception("Failed to get labels")
+
 
 parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
 parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
@@ -199,15 +280,23 @@ if args.url:
     labels = request_labels_list(args.repo)
     # PICK LABELS
     picked_labels = pick_labels(args.url, args.title, args.description, labels)
+    print(picked_labels)
     # NEW LABELS GENERATION
-    if check_if_new_labels_needed(labels, args.url, args.title, args.description):
-        generated_labels = generate_new_labels(labels, args.url, args.title, args.description)
-        generated_labels_list = json.loads(generated_labels.content)
-        if "New Label" not in picked_labels.keys():
-            picked_labels["New Label"] = True
+    labels_needed, confidence = check_if_new_labels_needed(labels, args.url, args.title, args.description)
+    if labels_needed:
+        generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
+        generated_labels['confidence'] = confidence
+        if confidence >= 99:
+            labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
+            # add labels_created to picked_labels
+            picked_labels['label_name'] = picked_labels['label_name'] + "," + ",".join(labels_created)
+        print(f"generated_labels: {generated_labels}")
+        if "New-Label" not in picked_labels['label_name']:
+            picked_labels['label_name'] = picked_labels['label_name'] + ",New-Label"
 
-        labels_dict["generated_labels"] = generated_labels_list
+        labels_dict["generated_labels"] = generated_labels
     
     labels_dict["picked_labels"] = picked_labels
+
     sys.stdout = sys.__stdout__
     print(f"{json.dumps(labels_dict, indent=4)}")

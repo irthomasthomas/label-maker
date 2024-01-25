@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 # github_issues.sh
 
@@ -12,16 +12,13 @@ send_note_to_github() {
     local task_list
     local issue_url
     local labels_csv
-    echo >&2
-    echo "FUNC: github_issues.sh > send_note_to_github" >&2
-    echo "generated_labels: $gh_markdown_highlight_generated_labels" >&2
-
-    echo >&2
+    
     if [ -z "$TITLE" ]; then
         TITLE="$(llm "generate a title from this url:$URL:quote:$DESCRIPTION" -o temperature 0.1)"
     fi
-    DESCRIPTION=$(llm -m mistral-small "Reformat this into a beautiful github issues markdown: $DESCRIPTION" -o temperature 1)
-    
+    echo "Generating description" >&2
+    DESCRIPTION=$(llm -m mistral-small "Reformat this into beautiful markdown. DO NOT rewrite it or editorialize it in any way: $DESCRIPTION" -o temperature 1)
+    echo "Done generating description" >&2
     task_list="- [ ] [${TITLE}](${URL})"
     suggested_labels="#### Suggested labels
 #### $gh_markdown_highlight_generated_labels"
@@ -31,9 +28,9 @@ send_note_to_github() {
 $DESCRIPTION
 
 $suggested_labels"
-    labels_csv=$(echo "$labels" | tr '\n' ',' | sed 's/.$//')
-    echo "TITLE: $TITLE" >&2
-    echo "BODY: $BODY" >&2
+    labels_csv=$(echo "$labels" | tr "\n" "," | sed "s/.$//" | sed "s/,/\",\"/g")
+    # remove spaces
+    labels_csv=$(echo "$labels_csv" | sed "s/ //g")
     issue_url=$(gh issue create --title "$TITLE" --body "$BODY" --label "$labels_csv")
     nyxt "$issue_url"
     WIN_ID=$(wmctrl -l | grep "^.*Nyxt - " | awk '{print $1}')
@@ -69,14 +66,9 @@ echo "URL: $URL" >&2
 # echo "DESCRIPTION: $DESCRIPTION" >&2
 echo >&2
 labels_json=$(get_labels_json "$TITLE" "$URL" "$DESCRIPTION")
-echo "labels_json: $labels_json" >&2
-echo >&2
-generate_labels=$(echo "$labels_json" | jq '.new_labels_created | to_entries[]')
-# echo "generate_labels: $generate_labels" >&2
-echo >&2
-picked_labels=$(echo "$labels_json" | jq '.existing_labels_picked | to_entries[] | select(.value == true) | .key')
-# echo "picked_labels: $picked_labels" >&2
-gh_markdown_highlight_generated_labels=$(echo "$generate_labels" | tr '\n' ' ' | sed 's/.$//')
-# echo "gh_markdown_highlight_generated_labels: $gh_markdown_highlight_generated_labels" >&2
+echo "$labels_json" >&2
+generate_labels=$(echo "$labels_json" | jq '.generated_labels')
+picked_labels=$(echo "$labels_json" | jq '.picked_labels .label_name')
 
+gh_markdown_highlight_generated_labels=$(echo "$generate_labels" | tr '\n' ' ' | sed 's/.$//')
 send_note_to_github "$TITLE" "$URL" "$DESCRIPTION" "$picked_labels" "$gh_markdown_highlight_generated_labels"
