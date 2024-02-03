@@ -17,10 +17,6 @@ create_pipes() {
         mkfifo "$pipe_selection"   && echo "Created named pipe: $pipe_selection" >&2
     fi
 
-    if [ ! -d "$target_directory" ]; then
-        echo "Cannot find directory $target_directory" >&2
-        exit 1
-    fi
 }
 
 monitor_nyxt_to_gh_pipes() {
@@ -39,9 +35,6 @@ monitor_nyxt_to_gh_pipes() {
     /home/thomas/Development/Projects/llm/label-maker/github_issues.sh "$TITLE" "$URL" "$SELECTION"
 }
 
-target_project="undecidability"
-target_directory="$HOME/$target_project"
-cd "$target_directory" || return 2
 
 pipe_title="/tmp/nyxt_title"
 pipe_url="/tmp/nyxt_url"

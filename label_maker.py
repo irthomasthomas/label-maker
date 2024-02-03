@@ -15,24 +15,22 @@ print(f"openai version: {client._version}")
 
 def request_labels_list(repo):
     with open('/dev/tty', 'w') as f:
-        f.write(f"get_issues_labels_list: {repo}\n\n")
-        per_page = 100
-        command = ["gh", "label", "list", "-R", repo, "-L", "100", "--json", "name,description,color"]
+        f.write(f"get_issues_labels_list: {repo}\n")
+        
+        command = ["gh", "label", "list", "-R", repo, "-L", "100", "--json", "name,description"]
         
         # Execute the command using subprocess
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         labels = json.loads(result.stdout)
+        
         if labels:
-            f.write(f"got {len(labels)} labels\n\n")
+            f.write(f"got {len(labels)} labels\n")
         
         if result.stderr:
             print("Error:", result.stderr)
-        parsed_labels = ""
-        label_dict = {}
-        
-        for label in labels:
-            parsed_labels += f"{label['name']}: {label['description']}\n"
-        return parsed_labels
+            
+        # No need to parse labels into a string, just directly return the JSON loaded list
+        return labels
 
 
 def check_if_new_labels_needed(labels, url, title, description):
@@ -172,21 +170,23 @@ def create_new_gh_issues_labels(repo, label_list):
     """Create new labels for a GitHub repo."""
     new_labels_created = []
     for label in label_list:
-        label_name = label["name"]
+        label_names = label["name"]
         label_description = label["description"]
-        command = ["gh", "label", "create", "-R", repo, label_name, "-d", label_description]
+        command = ["gh", "label", "create", "-R", repo, label_names, "-d", label_description]
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         if result.stderr:
             print("Error:", result.stderr)
         else:
-            print(f"Created label: {label_name}")
-            new_labels_created.append(label_name)
+            print(f"Created label: {label_names}")
+            new_labels_created.append(label_names)
     
     return new_labels_created
 
 
 def pick_labels(url, title, description, labels):
-    """    Choose the labels to assign to a bookmark.    """
+    """
+    Choose the labels to assign to a bookmark, with improved handling for different formats.
+    """
     tools = [
         {
             "type": "function",
@@ -196,31 +196,35 @@ def pick_labels(url, title, description, labels):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "label_name": {
+                        "label_names": {
                             "type": "string",
                             "description": "A list of label names."},
                     },
-                    "required": ["label_name"],
+                    "required": ["label_names"],
                 },
             },
         },
     ]
     system_message = """
-        You are a helpful assistant designed to label text. 
-        Think carefully about the labels you select. 
+        You are a helpful assistant designed to label text.
+        Think carefully about the labels you select.
         The labels you select should make it easier to organize and search for information.
          **IMPORTANT** Only pick from the labels here given."""
     pick_labels_query = f"""
-    Given the following content:\n
-    url: {url}\n
-    title: {title}\n
-    description: {description}\n
-    
+    Given the following content:
+
+    url: {url}
+
+    title: {title}
+
+    description: {description}
+
+
     Which, if any, of these labels certainly apply to this content?
     *IMPORTANT* Only pick up to FIVE labels from the labels provided if they apply.
-    
+
     **existing labels:**
-    
+
     {labels}
 
     **IMPORTANT** Only say A MAXIMUM OF FIVE labels from the labels under the **labels:** heading. Do not say anything else
@@ -248,21 +252,16 @@ def pick_labels(url, title, description, labels):
             continue
         else:
             picked_labels = json.loads(tool_calls[0].function.arguments)
-            picked_labels_list = picked_labels['label_name'].split(",")
-            print(f"picked_labels_list: {picked_labels_list}")
-            missing_labels = {}
-            for picked_label in picked_labels_list:
-                if picked_label not in labels:
-                    picked_labels_list.remove(picked_label)
-                    missing_labels[picked_label] = "missing"
+            picked_labels_list = [label.strip().lower() for label in picked_labels['label_names'].split(",")]
+            
+            # Extract and clean existing label names to ensure accurate comparison
+            existing_labels = [label['name'].lower().strip() for label in labels]            
+            valid_picked_labels = [label for label in picked_labels_list if label in existing_labels]
+            missing_labels = {label: "missing" for label in picked_labels_list if label not in valid_picked_labels}
             checked_labels = {}
-            checked_labels['label_name'] = ",".join(picked_labels_list)
+            checked_labels['label_names'] = ",".join(valid_picked_labels)
             checked_labels['missing_labels'] = missing_labels
-            
-            
             return checked_labels
-
-        
     raise Exception("Failed to get labels")
 
 
@@ -277,26 +276,38 @@ labels_dict = {}
 generated_labels = None
 if args.url:
     # EXISTING LABELS
-    labels = request_labels_list(args.repo)
-    # PICK LABELS
-    picked_labels = pick_labels(args.url, args.title, args.description, labels)
-    print(picked_labels)
-    # NEW LABELS GENERATION
-    labels_needed, confidence = check_if_new_labels_needed(labels, args.url, args.title, args.description)
-    if labels_needed:
-        generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
-        generated_labels['confidence'] = confidence
-        if confidence >= 99:
-            labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
-            # add labels_created to picked_labels
-            picked_labels['label_name'] = picked_labels['label_name'] + "," + ",".join(labels_created)
-        print(f"generated_labels: {generated_labels}")
-        if "New-Label" not in picked_labels['label_name']:
-            picked_labels['label_name'] = picked_labels['label_name'] + ",New-Label"
+    MAX_RETRIES = 3
+    while MAX_RETRIES > 0:
+        MAX_RETRIES -= 1
+        try:
+            original_labels = request_labels_list(args.repo)
+            label_mapping = {label['name'].lower(): label['name'] for label in original_labels}    # PICK LABELS
+            picked_labels = pick_labels(args.url, args.title, args.description, original_labels)
+            print(picked_labels)
+            picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
+            print(f"picked_labels: {picked_labels}")
+            # NEW LABELS GENERATION
+            labels_needed, confidence = check_if_new_labels_needed(original_labels, args.url, args.title, args.description)
+            if labels_needed:
+                generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
+                generated_labels['confidence'] = confidence
+                if confidence >= 99:
+                    labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
+                    # add labels_created to picked_labels
+                    picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
 
-        labels_dict["generated_labels"] = generated_labels
-    
-    labels_dict["picked_labels"] = picked_labels
+                # print(f"generated_labels: {generated_labels}")
+                if "New-Label" not in picked_labels['label_names']:
+                    picked_labels['label_names'] = picked_labels['label_names'] + ",New-Label"
 
-    sys.stdout = sys.__stdout__
-    print(f"{json.dumps(labels_dict, indent=4)}")
+                labels_dict["generated_labels"] = generated_labels
+            
+            labels_dict["picked_labels"] = picked_labels
+
+            sys.stdout = sys.__stdout__
+            print(f"{json.dumps(labels_dict, indent=4)}")
+            break
+        except Exception as e:
+            print(e)
+            continue
+        
