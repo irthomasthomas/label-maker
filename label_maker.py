@@ -1,4 +1,4 @@
-import os, json, argparse, subprocess, sys, requests
+import os, json, argparse, sys, requests
 import numpy as np
 from openai import OpenAI
 
@@ -13,24 +13,60 @@ else:
 
 print(f"openai version: {client._version}")
 
+
+def gh_api_request(repo, method="GET", endpoint="", data=None):
+    """
+    General-purpose GitHub API request function.
+    
+    :param repo: Repository name including the owner (e.g., "owner/repo")
+    :param method: HTTP method (e.g., "GET", "POST")
+    :param endpoint: API endpoint after the repo URL (e.g., "/labels")
+    :param data: Data payload for POST requests
+    :return: Response object
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{repo}{endpoint}"
+    
+    if method.upper() == "GET":
+        response = requests.get(url, headers=headers)
+    elif method.upper() == "POST":
+        response = requests.post(url, json=data, headers=headers)
+    else:
+        raise ValueError(f"Unsupported HTTP method: {method}")
+    
+    return response
+
 def request_labels_list(repo):
-    with open('/dev/tty', 'w') as f:
-        f.write(f"get_issues_labels_list: {repo}\n")
-        
-        command = ["gh", "label", "list", "-R", repo, "-L", "100", "--json", "name,description"]
-        
-        # Execute the command using subprocess
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        labels = json.loads(result.stdout)
-        
-        if labels:
-            f.write(f"got {len(labels)} labels\n")
-        
-        if result.stderr:
-            print("Error:", result.stderr)
-            
-        # No need to parse labels into a string, just directly return the JSON loaded list
+    response = gh_api_request(repo, endpoint="/labels?per_page=100")
+    if response.ok:
+        labels = response.json()
+        print(f"Got {len(labels)} labels")
         return labels
+    else:
+        print(f"Failed to get labels: {response.text}")
+        return []
+
+def create_new_gh_issues_labels(repo, label_list):
+    new_labels_created = []
+    for label in label_list:
+        label_name = label["name"]
+        label_description = label.get("description", "")  # Use .get() to avoid KeyError if 'description' is missing
+        data = {
+            "name": label_name,
+            "description": label_description,
+            "color": "f29513",  # Consider dynamically setting or randomizing color
+        }
+        response = gh_api_request(repo, method="POST", endpoint="/labels", data=data)
+        if response.ok:
+            print(f"Created label: {label_name}")
+            new_labels_created.append(label_name)
+        else:
+            print(f"Failed to create label {label_name}: {response.text}")
+    return new_labels_created
 
 
 def check_if_new_labels_needed(labels, url, title, description):
@@ -99,7 +135,7 @@ def generate_new_labels(labels, url, title, description):
     """Generate new labels if the existing labels are inadequate."""
     tools = [
         {
-            "type": "function", #
+            "type": "function",
             "function": {
                 "name": "create_new_label",
                 "description": """Create a new label to delineate the content. Think carefully and choose labels wisely.""",
@@ -166,22 +202,6 @@ def generate_new_labels(labels, url, title, description):
     raise Exception("Failed to get labels")
 
 
-def create_new_gh_issues_labels(repo, label_list):
-    """Create new labels for a GitHub repo."""
-    new_labels_created = []
-    for label in label_list:
-        label_names = label["name"]
-        label_description = label["description"]
-        command = ["gh", "label", "create", "-R", repo, label_names, "-d", label_description]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        if result.stderr:
-            print("Error:", result.stderr)
-        else:
-            print(f"Created label: {label_names}")
-            new_labels_created.append(label_names)
-    
-    return new_labels_created
-
 
 def pick_labels(url, title, description, labels):
     """
@@ -192,13 +212,13 @@ def pick_labels(url, title, description, labels):
             "type": "function",
             "function": {
                 "name": "assign_content_labels",
-                "description": "Save a list of labels picked to delineate content.",
+                "description": "Save a CSV list of labels chosen to delineate the content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "label_names": {
                             "type": "string",
-                            "description": "A list of label names."},
+                            "description": "A CSV list of label names."},
                     },
                     "required": ["label_names"],
                 },
@@ -208,37 +228,34 @@ def pick_labels(url, title, description, labels):
     system_message = """
         You are a helpful assistant designed to label text.
         Think carefully about the labels you select.
-        The labels you select should make it easier to organize and search for information.
-         **IMPORTANT** Only pick from the labels here given."""
+        The labels you select should make it easier to organize the information and delineate the content.
+         **IMPORTANT** Pay attention to ALL labels and Only pick from the labels here given."""
     pick_labels_query = f"""
-    Given the following content:
+    <content>
+    <url>{url}</url>
 
-    url: {url}
+    <title>{title}</title>
 
-    title: {title}
+    <description>{description}</description>
+    </content>
 
-    description: {description}
+    <instructions>Do any of these labels certainly apply to this content?
+    *IMPORTANT* Pick about six labels from the labels_list if they apply. Look at and consider ALL of the labels.
+    First write the labels you think apply, then call the function with the labels you have finally chosen in a CSV list.
+    </instructions>
 
-
-    Which, if any, of these labels certainly apply to this content?
-    *IMPORTANT* Only pick up to FIVE labels from the labels provided if they apply.
-
-    **existing labels:**
-
-    {labels}
-
-    **IMPORTANT** Only say A MAXIMUM OF FIVE labels from the labels under the **labels:** heading. Do not say anything else
+    <labels_list>{labels}</labels_list>
     """
 
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": pick_labels_query}
     ]
-    max_retries = 3
+    max_retries = 6
     while max_retries > 0:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-1106",
-            temperature=1,
+            model="gpt-3.5-turbo-0125",
+            temperature=0.9,
             seed=0,
             messages=messages,
             tools=tools,
@@ -252,6 +269,9 @@ def pick_labels(url, title, description, labels):
             continue
         else:
             picked_labels = json.loads(tool_calls[0].function.arguments)
+            print("Picked labels:")
+            print(picked_labels)
+
             picked_labels_list = [label.strip().lower() for label in picked_labels['label_names'].split(",")]
             
             # Extract and clean existing label names to ensure accurate comparison
@@ -265,49 +285,53 @@ def pick_labels(url, title, description, labels):
     raise Exception("Failed to get labels")
 
 
+def main():
+    args = parser.parse_args()
+
+    labels_dict = {}
+    generated_labels = None
+    if args.url:
+        # EXISTING LABELS
+        MAX_RETRIES = 3
+        while MAX_RETRIES > 0:
+            MAX_RETRIES -= 1
+            try:
+                original_labels = request_labels_list(args.repo)
+                label_mapping = {label['name'].lower(): label['name'] for label in original_labels}    # PICK LABELS
+                picked_labels = pick_labels(args.url, args.title, args.description, original_labels)
+                print(picked_labels)
+                picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
+                print(f"picked_labels: {picked_labels}")
+                # NEW LABELS GENERATION
+                labels_needed, confidence = check_if_new_labels_needed(original_labels, args.url, args.title, args.description)
+                if labels_needed:
+                    generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
+                    generated_labels['confidence'] = confidence
+                    if confidence >= 99:
+                        labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
+                        # add labels_created to picked_labels
+                        picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
+
+                    # print(f"generated_labels: {generated_labels}")
+                    if "New-Label" not in picked_labels['label_names']:
+                        picked_labels['label_names'] = picked_labels['label_names'] + ",New-Label"
+
+                    labels_dict["generated_labels"] = generated_labels
+                
+                labels_dict["picked_labels"] = picked_labels
+
+                sys.stdout = sys.__stdout__
+                print(f"{json.dumps(labels_dict, indent=4)}")
+                break
+            except Exception as e:
+                print(e)
+                continue
+
 parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
 parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
 parser.add_argument('--title', metavar='title', type=str, help='The title of the bookmark.')
 parser.add_argument('--description', metavar='description', type=str, help='The selected text of the bookmark.')
 parser.add_argument('--repo', metavar='repo', type=str, help='The repo to get labels from.', default="irthomasthomas/undecidability")
-args = parser.parse_args()
 
-labels_dict = {}
-generated_labels = None
-if args.url:
-    # EXISTING LABELS
-    MAX_RETRIES = 3
-    while MAX_RETRIES > 0:
-        MAX_RETRIES -= 1
-        try:
-            original_labels = request_labels_list(args.repo)
-            label_mapping = {label['name'].lower(): label['name'] for label in original_labels}    # PICK LABELS
-            picked_labels = pick_labels(args.url, args.title, args.description, original_labels)
-            print(picked_labels)
-            picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
-            print(f"picked_labels: {picked_labels}")
-            # NEW LABELS GENERATION
-            labels_needed, confidence = check_if_new_labels_needed(original_labels, args.url, args.title, args.description)
-            if labels_needed:
-                generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
-                generated_labels['confidence'] = confidence
-                if confidence >= 99:
-                    labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
-                    # add labels_created to picked_labels
-                    picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
-
-                # print(f"generated_labels: {generated_labels}")
-                if "New-Label" not in picked_labels['label_names']:
-                    picked_labels['label_names'] = picked_labels['label_names'] + ",New-Label"
-
-                labels_dict["generated_labels"] = generated_labels
-            
-            labels_dict["picked_labels"] = picked_labels
-
-            sys.stdout = sys.__stdout__
-            print(f"{json.dumps(labels_dict, indent=4)}")
-            break
-        except Exception as e:
-            print(e)
-            continue
-        
+if __name__ == "__main__":
+    main()
