@@ -1,62 +1,70 @@
-#!/usr/bin/env python3
-import subprocess
-import requests
-import json
-import webbrowser
+import llm
+import os
+import argparse
+import logging
+
+from label_maker import gh_api_request, generate_labels
+
 
 def send_note_to_github(title, url, description, labels, gh_markdown_highlight_generated_labels, repo):
+    model = llm.get_model("gpt-3.5-turbo")
+    model.key = os.getenv("OPENAI_API_KEY")
     if not title:
-        # Simulating external CLI tool for title generation, replace 'llm' command with actual API call or logic if needed.
-        title = "Generated Title based on URL and Description"  # Placeholder logic
+        title = model.prompt(f"generate a title from this url:{url}:quote:{description}", temperature=0.1).text()
 
-    print("Generating description")
-    # Description generation logic (Placeholder)
-    description = "Beautiful Markdown Generated Description"  # Replace with actual markdown generation logic
-    print("Done generating description")
+    # Reformat description
+    description_prompt = f"Reformat this into beautiful markdown(GFM). Keep the wording exact. Only edit formatting. Include the entire content. **IMPORTANT** ADD NO ADDITIONAL COMMENTARY OR TEXT OF ANY KIND.\n**CONTENT**:\n'''TITLE:{title}\nDESCRIPTION:{description}\nURL:{url}'''"
+    description = model.prompt(description_prompt, temperature=0.1).text()
 
     task_list = f"- [ ] [{title}]({url})"
     suggested_labels = f"#### Suggested labels\n#### {gh_markdown_highlight_generated_labels}"
 
     body = f"{task_list}\n\n{description}\n\n{suggested_labels}"
-    print(f"github_issues > send_note_to_github: labels:\n{labels}")
+    picked_labels = labels['picked_labels']['label_names']
 
-    labels_csv = '","'.join(labels.replace(" ", "").split("\n"))
-    
-    issue_url = create_github_issue(repo, title, body, labels_csv)
-    webbrowser.open(issue_url)
-    focus_browser_window()
+    issue_url = create_github_issue(repo, title, body, picked_labels)
+    print(f"Issue created: {issue_url}")
+
 
 def create_github_issue(repo, title, body, labels):
-    command = ['gh', 'issue', 'create', '-R', repo, '--title', title, '--body', body, '--label', labels]
-    result = subprocess.run(command, capture_output=True, text=True)
-    return result.stdout.strip()
+    """
+    Creates a GitHub issue.
+    
+    :param repo: Repository name including the owner (e.g., "owner/repo")
+    :param title: Issue title
+    :param body: Issue body description
+    :param labels: Comma-separated string of labels
+    :return: URL of the created issue or None
+    """
+    print(f"labels: {labels}")
+    data = {
+        "title": title,
+        "body": body,
+        "labels": labels.split(",")
+    }
+    print(f"data: {data}")
+    
+    response = gh_api_request(repo, method="POST", endpoint="/issues", data=data)
+    if response.ok:
+        return response.json()["html_url"]
+    else:
+        print(f"Failed to create issue: {response.text}")
+        return None
+    
 
-def focus_browser_window():
-    subprocess.run(['wmctrl', '-a', 'Nyxt'])
+parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
+parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
+parser.add_argument('--title', metavar='title', type=str, help='The title of the bookmark.')
+parser.add_argument('--description', metavar='description', type=str, help='The selected text of the bookmark.')
+parser.add_argument('--repo', metavar='repo', type=str, help='The repo to get labels from.', default="irthomasthomas/undecidability")
 
-def get_labels_json(title, url, description):
-    # Placeholder for label generation, replace with actual external call or logic.
-    labels_json = {"generated_labels": ["bug", "feature"], "picked_labels": {"label_names": ["improvement", "urgent"]}}
-    return labels_json
+args = parser.parse_args()
+logging.basicConfig(level=logging.INFO)
 
-def main(title, url, description, repo="irthomasthomas/undecidability"):
-    print("TITLE:", title)
-    print("URL:", url)
+labels_json = generate_labels(args.url, args.title, args.description, args.repo)
+picked_labels = labels_json['picked_labels']['label_names']
+generated_labels = labels_json['generated_labels']
 
-    labels_json = get_labels_json(title, url, description)
-    generate_labels = ' '.join(labels_json.get("generated_labels", []))
-    picked_labels = '\n'.join(labels_json.get("picked_labels", {}).get("label_names", []))
+url = send_note_to_github(args.title, args.url, args.description, labels_json, generated_labels, args.repo)
 
-    gh_markdown_highlight_generated_labels = generate_labels.rstrip(',')
-    send_note_to_github(title, url, description, picked_labels, gh_markdown_highlight_generated_labels, repo)
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 4:
-        print("Usage: <script> <title> <url> <description>")
-        sys.exit(1)
-
-    title = sys.argv[1]
-    url = sys.argv[2]
-    description = sys.argv[3]
-    main(title, url, description)
+os.system(f"open {url}")

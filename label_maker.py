@@ -1,4 +1,8 @@
-import os, json, argparse, sys, requests
+import os
+import json
+import argparse
+import sys
+import requests
 import numpy as np
 from openai import OpenAI
 
@@ -40,6 +44,7 @@ def gh_api_request(repo, method="GET", endpoint="", data=None):
     
     return response
 
+
 def request_labels_list(repo):
     response = gh_api_request(repo, endpoint="/labels?per_page=100")
     if response.ok:
@@ -49,6 +54,7 @@ def request_labels_list(repo):
     else:
         print(f"Failed to get labels: {response.text}")
         return []
+
 
 def create_new_gh_issues_labels(repo, label_list):
     new_labels_created = []
@@ -202,7 +208,6 @@ def generate_new_labels(labels, url, title, description):
     raise Exception("Failed to get labels")
 
 
-
 def pick_labels(url, title, description, labels):
     """
     Choose the labels to assign to a bookmark, with improved handling for different formats.
@@ -211,14 +216,14 @@ def pick_labels(url, title, description, labels):
         {
             "type": "function",
             "function": {
-                "name": "assign_content_labels",
-                "description": "Save a CSV list of labels chosen to delineate the content.",
+                "name": "assign_labels",
+                "description": "Save a list of labels to cleanly delineate the content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "label_names": {
                             "type": "string",
-                            "description": "A CSV list of label names."},
+                            "description": "A list of labels, e.g. source-code,Papers,RAG."},
                     },
                     "required": ["label_names"],
                 },
@@ -259,18 +264,16 @@ def pick_labels(url, title, description, labels):
             seed=0,
             messages=messages,
             tools=tools,
-            tool_choice={"type": "function", "function": {"name": "assign_content_labels"}},
+            tool_choice={"type": "function", "function": {"name": "assign_labels"}},
         )
         response_message = response.choices[0].message
         tool_calls = response_message.tool_calls
         function_name = tool_calls[0].function.name
-        if not function_name == "assign_content_labels":
+        if not function_name == "assign_labels":
             max_retries -= 1
             continue
         else:
             picked_labels = json.loads(tool_calls[0].function.arguments)
-            print("Picked labels:")
-            print(picked_labels)
 
             picked_labels_list = [label.strip().lower() for label in picked_labels['label_names'].split(",")]
             
@@ -285,47 +288,42 @@ def pick_labels(url, title, description, labels):
     raise Exception("Failed to get labels")
 
 
-def main():
-    args = parser.parse_args()
-
+def generate_labels(url, title, description, repo):
     labels_dict = {}
     generated_labels = None
-    if args.url:
-        # EXISTING LABELS
-        MAX_RETRIES = 3
-        while MAX_RETRIES > 0:
-            MAX_RETRIES -= 1
-            try:
-                original_labels = request_labels_list(args.repo)
-                label_mapping = {label['name'].lower(): label['name'] for label in original_labels}    # PICK LABELS
-                picked_labels = pick_labels(args.url, args.title, args.description, original_labels)
-                print(picked_labels)
-                picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
-                print(f"picked_labels: {picked_labels}")
-                # NEW LABELS GENERATION
-                labels_needed, confidence = check_if_new_labels_needed(original_labels, args.url, args.title, args.description)
-                if labels_needed:
-                    generated_labels = generate_new_labels(picked_labels, args.url, args.title, args.description)
-                    generated_labels['confidence'] = confidence
-                    if confidence >= 99:
-                        labels_created = create_new_gh_issues_labels(args.repo, generated_labels)
-                        # add labels_created to picked_labels
-                        picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
 
-                    # print(f"generated_labels: {generated_labels}")
-                    if "New-Label" not in picked_labels['label_names']:
-                        picked_labels['label_names'] = picked_labels['label_names'] + ",New-Label"
+    # EXISTING LABELS
+    MAX_RETRIES = 3
+    while MAX_RETRIES > 0:
+        MAX_RETRIES -= 1
+        try:
+            original_labels = request_labels_list(repo)
+            label_mapping = {label['name'].lower(): label['name'] for label in original_labels}
+            picked_labels = pick_labels(url, title, description, original_labels)
+            picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
 
-                    labels_dict["generated_labels"] = generated_labels
-                
-                labels_dict["picked_labels"] = picked_labels
+            # NEW LABELS GENERATION
+            labels_needed, confidence = check_if_new_labels_needed(original_labels, url, title, description)
+            if labels_needed:
+                generated_labels = generate_new_labels(picked_labels, url, title, description)
+                generated_labels['confidence'] = confidence
+                if confidence >= 99:
+                    labels_created = create_new_gh_issues_labels(repo, generated_labels)
+                    picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
 
-                sys.stdout = sys.__stdout__
-                print(f"{json.dumps(labels_dict, indent=4)}")
-                break
-            except Exception as e:
-                print(e)
-                continue
+                if "New-Label" not in picked_labels['label_names']:
+                    picked_labels['label_names'] = picked_labels['label_names'] + ",New-Label"
+
+                labels_dict["generated_labels"] = generated_labels
+            
+            labels_dict["picked_labels"] = picked_labels
+
+            return labels_dict
+        except Exception as e:
+            print(e)
+            continue
+
+
 
 parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
 parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
@@ -333,5 +331,9 @@ parser.add_argument('--title', metavar='title', type=str, help='The title of the
 parser.add_argument('--description', metavar='description', type=str, help='The selected text of the bookmark.')
 parser.add_argument('--repo', metavar='repo', type=str, help='The repo to get labels from.', default="irthomasthomas/undecidability")
 
+
 if __name__ == "__main__":
-    main()
+    args = parser.parse_args()
+    labels = generate_labels(args.url, args.title, args.description, args.repo)
+    sys.stdout = sys.__stdout__
+    print(f"{json.dumps(labels, indent=4)}")
