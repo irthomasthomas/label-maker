@@ -5,6 +5,11 @@ import sys
 import requests
 import numpy as np
 from openai import OpenAI
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+)  # for exponential backoff
 
 client = OpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
@@ -46,6 +51,15 @@ def gh_api_request(repo, method="GET", endpoint="", data=None):
 
 
 def request_labels_list(repo):
+    """
+    Requests the list of labels for a given repository.
+
+    Args:
+        repo (str): The name of the repository.
+
+    Returns:
+        list: A list of labels if the request is successful, otherwise an empty list.
+    """
     response = gh_api_request(repo, endpoint="/labels?per_page=100")
     if response.ok:
         labels = response.json()
@@ -56,7 +70,17 @@ def request_labels_list(repo):
         return []
 
 
-def create_new_gh_issues_labels(repo, label_list):
+def create_new_labels(repo, label_list):
+    """
+    Creates new GitHub issues labels for a given repository.
+
+    Args:
+        repo (str): The name of the repository.
+        label_list (list): A list of dictionaries containing label information.
+
+    Returns:
+        list: A list of label names that were successfully created.
+    """
     new_labels_created = []
     for label in label_list:
         label_name = label["name"]
@@ -75,16 +99,16 @@ def create_new_gh_issues_labels(repo, label_list):
     return new_labels_created
 
 
-def check_if_new_labels_needed(labels, url, title, description):
-    terminal_content = ""
-
+@retry(stop=stop_after_attempt(8), wait=wait_random_exponential(multiplier=1, max=60))
+def check_if_new_labels_needed(current_labels, page_url, page_title, page_snippet):
+    
     system_message = """You are a helpful assistant designed to answer binary questions with True or False."""
 
     adequate_labels_query = f"""
         Given the following bookmark:
-        url: {url}
-        title: {title}
-        description: {description}
+        url: {page_url}
+        title: {page_title}
+        snippet: {page_snippet}
 
         Are new labels needed to adequately delineate the broad categories and topics of the bookmark? (True) or can you label it accurately with the existing labels? (False)
         Only answer True if you are certain that new labels are needed. 
@@ -93,7 +117,7 @@ def check_if_new_labels_needed(labels, url, title, description):
         Only reply with True or False.
 
         **labels:**
-        {labels}
+        {current_labels}
 
         **Important**: Say nothing except true or false."""
     
@@ -137,28 +161,29 @@ def check_if_new_labels_needed(labels, url, title, description):
     return False,0
 
 
-def generate_new_labels(labels, url, title, description):
+@retry(stop=stop_after_attempt(8), wait=wait_random_exponential(multiplier=1, max=60))
+def generate_new_labels(current_labels, page_url, page_title, page_snippet):
     """Generate new labels if the existing labels are inadequate."""
     tools = [
         {
             "type": "function",
             "function": {
                 "name": "create_new_label",
-                "description": """Create a new label to delineate the content. Think carefully and choose labels wisely.""",
+                "description": "Create a new label to delineate the content. Think carefully and choose labels wisely.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "label-name": {
                             "type": "string",
                             "description": "label-name."},
-                        "description": {
+                        "label-description": {
                             "type": "string",
-                            "description": "The description of the label."},
-                        "repo": {
+                            "description": "A brief description for the label."},
+                        "gh-repo": {
                             "type": "string",
-                            "description": "The repo to create the label in."},
+                            "description": "The gh repo to create the label in."},
                     },
-                    "required": ["label-name", "description", "repo"],
+                    "required": ["label-name", "label-description", "gh-repo"],
                 },
             },
         },
@@ -166,15 +191,15 @@ def generate_new_labels(labels, url, title, description):
     system_message = """
         You are a helpful assistant designed to output correct JSON lists of labels.
         Use the JSON format: {"label": "description", "label": "description"}.
-        **IMPORTANT** Pay close attention to unfamiliar words and phrases, they may be very important to delineate a new concept.
+        **IMPORTANT** When thinking of new labels, pay close attention to unfamiliar words and phrases in the content to be labeled, they may be very important to delineate what is interesting about this content.
     """
     user_query = f"""Think of some keywords for this link.\n
-         url: {url}\n
-         title: {title}\n
-         description: {description}\n
+         url: {page_url}\n
+         title: {page_title}\n
+         description: {page_snippet}\n
          
          **current labels:**
-         {labels}\n
+         {current_labels}\n
 
         Write A MAXIMUM OF TWO NEW label,description pairs to describe this link.
         *IMPORTANT* Make sure the labels are useful. They should delineate the topic without being overly specific.
@@ -208,7 +233,8 @@ def generate_new_labels(labels, url, title, description):
     raise Exception("Failed to get labels")
 
 
-def pick_labels(url, title, description, labels):
+@retry(stop=stop_after_attempt(8), wait=wait_random_exponential(multiplier=1, max=60))
+def pick_labels(page_url, page_title, page_snippet, labels):
     """
     Choose the labels to assign to a bookmark, with improved handling for different formats.
     """
@@ -223,7 +249,7 @@ def pick_labels(url, title, description, labels):
                     "properties": {
                         "label_names": {
                             "type": "string",
-                            "description": "A list of labels, e.g. source-code,Papers,RAG."},
+                            "description": "A list of labels, e.g. source-code,Papers,RAG,New-Label"},
                     },
                     "required": ["label_names"],
                 },
@@ -237,11 +263,11 @@ def pick_labels(url, title, description, labels):
          **IMPORTANT** Pay attention to ALL labels and Only pick from the labels here given."""
     pick_labels_query = f"""
     <content>
-    <url>{url}</url>
+    <url>{page_url}</url>
 
-    <title>{title}</title>
+    <title>{page_title}</title>
 
-    <description>{description}</description>
+    <description>{page_snippet}</description>
     </content>
 
     <instructions>Do any of these labels certainly apply to this content?
@@ -288,7 +314,21 @@ def pick_labels(url, title, description, labels):
     raise Exception("Failed to get labels")
 
 
-def generate_labels(url, title, description, repo):
+@retry(stop=stop_after_attempt(8), wait=wait_random_exponential(multiplier=1, max=60))
+def generate_labels(page_url, page_title, page_snippet, target_repo):
+    """
+    Generates labels for a given page based on its URL, title, and snippet.
+
+    Args:
+        page_url (str): The URL of the page.
+        page_title (str): The title of the page.
+        page_snippet (str): The snippet of the page.
+        target_repo (str): The target repository to generate labels for.
+
+    Returns:
+        dict: A dictionary containing the generated labels and the picked labels.
+    """
+    
     labels_dict = {}
     generated_labels = None
 
@@ -297,18 +337,18 @@ def generate_labels(url, title, description, repo):
     while MAX_RETRIES > 0:
         MAX_RETRIES -= 1
         try:
-            original_labels = request_labels_list(repo)
+            original_labels = request_labels_list(target_repo)
             label_mapping = {label['name'].lower(): label['name'] for label in original_labels}
-            picked_labels = pick_labels(url, title, description, original_labels)
+            picked_labels = pick_labels(page_url, page_title, page_snippet, original_labels)
             picked_labels['label_names'] = ",".join([label_mapping[label] for label in picked_labels['label_names'].split(",")]) 
 
             # NEW LABELS GENERATION
-            labels_needed, confidence = check_if_new_labels_needed(original_labels, url, title, description)
+            labels_needed, confidence = check_if_new_labels_needed(original_labels, page_url, page_title, page_snippet)
             if labels_needed:
-                generated_labels = generate_new_labels(picked_labels, url, title, description)
+                generated_labels = generate_new_labels(picked_labels, page_url, page_title, page_snippet)
                 generated_labels['confidence'] = confidence
                 if confidence >= 99:
-                    labels_created = create_new_gh_issues_labels(repo, generated_labels)
+                    labels_created = create_new_labels(target_repo, generated_labels)
                     picked_labels['label_names'] = picked_labels['label_names'] + "," + ",".join(labels_created)
 
                 if "New-Label" not in picked_labels['label_names']:
@@ -328,7 +368,7 @@ def generate_labels(url, title, description, repo):
 parser = argparse.ArgumentParser(description='Generate labels for a given bookmark.')
 parser.add_argument('--url', metavar='url', type=str, help='The url of the bookmark.')
 parser.add_argument('--title', metavar='title', type=str, help='The title of the bookmark.')
-parser.add_argument('--description', metavar='description', type=str, help='The selected text of the bookmark.')
+parser.add_argument('--snippet', metavar='snippet', type=str, help='The selected text of the bookmark.')
 parser.add_argument('--repo', metavar='repo', type=str, help='The repo to get labels from.', default="irthomasthomas/undecidability")
 
 

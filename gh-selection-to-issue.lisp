@@ -1,16 +1,14 @@
 (define-command-global gh-send-selection-to-issue ()
   "Sends URL, title, and selected text to a new GitHub issue using github_issues.py."
   (let* ((title (title (current-buffer)))
-         (myurl (url (current-buffer)))
+         (myurl (quri:render-uri (url (current-buffer))))
          (selection
           (ps-eval
            (parenscript:chain window (get-selection) (to-string))))
-         (repo "irthomasthomas/undecidability") ;; Default repository. Change as needed.
-         ;; Path to your python script
+         (repo "irthomasthomas/undecidability") 
          (python-script "/home/thomas/Development/LLMs/label-maker/github_issues.py")
+         (python-interpreter "/home/thomas/Development/Projects/llm/.venv/bin/python3")
          ;; Construct the command to execute the Python script with arguments
-         (command (format nil "python3 ~a --title '~a' --url '~a' --description '~a' --repo '~a'"
-                          python-script
-                          title myurl selection repo)))
+         (command (list python-interpreter python-script "--title" title "--url" myurl "--snippet" selection "--repo" repo)))
     ;; Execute the command in the background
-    (uiop:run-program (list "sh" "-c" command) :output t)))
+    (uiop:run-program command :output t)))
