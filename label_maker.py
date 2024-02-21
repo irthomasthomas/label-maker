@@ -127,7 +127,7 @@ def check_if_new_labels_needed(current_labels, page_url, page_title, page_snippe
     ]
     
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo-1106",
+        model="gpt-3.5-turbo-0125",
         temperature=0,
         seed=1234,
         max_tokens=1,
@@ -214,7 +214,7 @@ def generate_new_labels(current_labels, page_url, page_title, page_snippet):
     max_retries = 3
     while max_retries > 0:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo-1106",
+            model="gpt-3.5-turbo-0125",
             temperature=1,
             seed=1234,
             messages=messages,
@@ -275,7 +275,11 @@ def pick_labels(page_url, page_title, page_snippet, labels):
     First write the labels you think apply, then call the function with the labels you have finally chosen in a CSV list.
     </instructions>
 
-    <labels_list>{labels}</labels_list>
+    <labels_list>
+    
+    {labels}
+    
+    </labels_list>
     """
 
     messages = [
