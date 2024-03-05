@@ -4,6 +4,8 @@ Here's the merged final document:
 
 This repository contains a collection of Python scripts and a Nyxt browser plugin that form an AI-powered assistant for managing GitHub issues. The main functionalities include:
 
+To see this in action visit [this link](https://github.com/irthomasthomas/undecidability/issues)
+
 1. **Automatic Label Generation**: The `label_maker.py` script uses Jina-embedding-v2-base to generate embeddings for issue content and intelligently generate labels based on the issue title, body, and URL. It can create new labels if the existing ones are inadequate to properly categorize the issue.
 
 2. **Duplicate Issue Detection**: The `github_issues.py` script employs vector embeddings to find similar issues in the repository. It calculates the cosine similarity between the embeddings of the new issue and existing issues to detect potential duplicates.
